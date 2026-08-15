@@ -1,6 +1,6 @@
 # Multi-Modal Medical Image Analysis Platform
 
-Final year project. Builds a web platform that accepts chest X-rays (optional
+Builds a web platform that accepts chest X-rays (optional
 clinical notes) and produces a pneumonia diagnosis with probability, region
 segmentation, and a structured radiology report.
 
@@ -11,17 +11,12 @@ Dataset: RSNA Pneumonia Detection Challenge (Kaggle) + NIH ChestX-ray14.
 | Part | Owner  | What it does                                                   | Status                  |
 |------|--------|------------------------------------------------------------------|--------------------------|
 | A    | Darshi | YOLOv8 pneumonia bounding box detection                          | working baseline         |
-| B    | Shreya | DenseNet embeddings + FAISS similar-case search                  | working baseline (Day 1) |
-| C    | Joy    | Multi-modal fusion (DenseNet + ClinicalBERT) + Grad-CAM           | partial baseline (Day 1) |
+| B    | Shreya | DenseNet embeddings + FAISS similar-case search                  | working baseline         |
+| C    | Joy    | Multi-modal fusion (DenseNet + ClinicalBERT) + Grad-CAM           | partial baseline        |
 | D    | Ankit  | Report generation, audit dashboard, deployment                   | not started              |
 
 Each part runs independently on the same raw X-ray input. Part D is the only
 place where all outputs come together.
 
-## Setup
-
-```bash
-pip install -r requirements.txt
-```
 
 Each part's folder has its own README with details specific to that part.

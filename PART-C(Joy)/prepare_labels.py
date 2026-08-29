@@ -5,42 +5,38 @@ The NIH ChestX-ray14 dataset gives labels as a single text column, e.g.
 "Cardiomegaly|Effusion" or "No Finding". This script turns that into a
 proper multi-label format: one column per pathology, 1 if present, 0 if
 not - which is what a PyTorch dataloader needs to train a classifier.
+It preserves extra metadata columns like 'Patient ID' and 'Clinical Notes' if available.
 """
 
-from pathlib import Path
-
 import pandas as pd
-
-BASE_DIR = Path(__file__).resolve().parent
-
-# ---- LOCAL path (default) ----
-RAW_CSV = BASE_DIR / "data" / "Data_Entry_2017.csv"
-
-# ---- KAGGLE path (use this instead if running in a Kaggle notebook) ----
-# RAW_CSV = Path("/kaggle/input/nih-chest-xrays/data/Data_Entry_2017.csv")
-
-OUTPUT_CSV = BASE_DIR / "data" / "labels_multilabel.csv"
-
-# the 14 official NIH pathology classes (excluding "No Finding")
-PATHOLOGIES = [
-    "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration", "Mass",
-    "Nodule", "Pneumonia", "Pneumothorax", "Consolidation", "Edema",
-    "Emphysema", "Fibrosis", "Pleural_Thickening", "Hernia",
-]
-
+import config
 
 def main():
-    df = pd.read_csv(RAW_CSV)
+    print(f"Reading raw CSV from: {config.RAW_CSV}")
+    if not config.RAW_CSV.exists():
+        raise FileNotFoundError(
+            f"Raw CSV not found at {config.RAW_CSV}. "
+            "Please run 'python generate_mock_data.py' first to set up mock data for testing."
+        )
 
-    for pathology in PATHOLOGIES:
+    df = pd.read_csv(config.RAW_CSV)
+
+    print("Mapping label columns...")
+    for pathology in config.PATHOLOGIES:
         # 1 if this pathology's name appears in the "Finding Labels" text, else 0
-        df[pathology] = df["Finding Labels"].apply(lambda labels: int(pathology in labels))
+        df[pathology] = df["Finding Labels"].apply(lambda labels: int(pathology in str(labels)))
 
-    output_columns = ["Image Index"] + PATHOLOGIES
-    df[output_columns].to_csv(OUTPUT_CSV, index=False)
+    # Keep Patient ID and Clinical Notes if they are present in raw data
+    extra_cols = []
+    if "Patient ID" in df.columns:
+        extra_cols.append("Patient ID")
+    if "Clinical Notes" in df.columns:
+        extra_cols.append("Clinical Notes")
 
-    print(f"done. wrote {len(df)} rows to {OUTPUT_CSV}")
+    output_columns = ["Image Index"] + extra_cols + config.PATHOLOGIES
+    df[output_columns].to_csv(config.LABELS_MULTILABEL_CSV, index=False)
 
+    print(f"Done. Wrote {len(df)} rows to {config.LABELS_MULTILABEL_CSV}")
 
 if __name__ == "__main__":
     main()

@@ -25,3 +25,10 @@ part_c_multimodal_fusion/model/*.pt
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Module C generated artifacts
+PART-C(Joy)/mlruns/
+PART-C(Joy)/mlflow.db
+PART-C(Joy)/model/*.pt
+
+PART-C(Joy)/results/gradcam/

@@ -1,0 +1,63 @@
+{
+    "model_name": "ImageOnlyClassifier",
+    "backbone": "densenet121",
+    "is_synthetic": true,
+    "seed": 42,
+    "class_names": [
+        "Atelectasis",
+        "Cardiomegaly",
+        "Effusion",
+        "Infiltration",
+        "Mass",
+        "Nodule",
+        "Pneumonia",
+        "Pneumothorax",
+        "Consolidation",
+        "Edema",
+        "Emphysema",
+        "Fibrosis",
+        "Pleural_Thickening",
+        "Hernia"
+    ],
+    "optimal_thresholds": [
+        0.52,
+        0.44,
+        0.5,
+        0.02,
+        0.5,
+        0.5,
+        0.5,
+        0.5800000000000001,
+        0.02,
+        0.02,
+        0.5,
+        0.5,
+        0.5,
+        0.02
+    ],
+    "image_size": [
+        224,
+        224
+    ],
+    "normalization": {
+        "mean": [
+            0.485,
+            0.456,
+            0.406
+        ],
+        "std": [
+            0.229,
+            0.224,
+            0.225
+        ]
+    },
+    "test_macro_metrics": {
+        "AUROC": 0.5041666666666667,
+        "F1": 0.0992063492063492,
+        "Precision": 0.06122448979591836,
+        "Recall": 0.2857142857142857,
+        "Sensitivity": 0.2857142857142857,
+        "Specificity": 0.4285714278435374,
+        "PR-AUC": 0.5136054421768708
+    }
+}

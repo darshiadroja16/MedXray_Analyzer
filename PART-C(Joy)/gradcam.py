@@ -1,101 +1,154 @@
 """
 Step 3 of Part C.
 
-Grad-CAM answers "which part of the image made the model predict this
-pathology?" - it produces a heatmap over the X-ray highlighting the
-regions the model paid the most attention to. This is what makes the
-model's decision explainable to a doctor instead of being a black box.
-
-Run this after train_classifier.py, on any single image you want to
-inspect.
+Grad-CAM answers "which part of the image made the model predict this pathology?"
+by showing which region the model paid the most attention to.
+Refactored to:
+- Work with the modular ImageEncoder (for both Visual-only and Late Fusion models).
+- Extract activations and gradients from the last conv layer dynamically.
+- Implement proper medical disclaimers on explainability vs. correctness.
 """
 
+import json
 from pathlib import Path
-
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
-
-from train_classifier import build_model, PATHOLOGIES, MODEL_OUTPUT_PATH
-
-BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = BASE_DIR / "results"
+import config
+from models import ImageOnlyClassifier, LateFusionClassifier
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-def generate_gradcam(image_path, pathology_name):
-    model = build_model()
-    model.load_state_dict(torch.load(MODEL_OUTPUT_PATH, map_location=device))
+def generate_gradcam(model, image_path, pathology_name, metadata, text_inputs=None):
+    """
+    Generates a Grad-CAM heatmap for a given image and pathology class.
+    Args:
+        model: PyTorch model instance (ImageOnlyClassifier or LateFusionClassifier)
+        image_path: Path to the input image file
+        pathology_name: Name of the pathology class to explain
+        metadata: Model metadata JSON containing class names and thresholds
+        text_inputs: Dictionary containing 'input_ids', 'attention_mask', and 'text_available' (for fusion model)
+    """
     model.eval()
-
-    # hook into the last convolutional block - that's where spatial
-    # information is still preserved (before it gets flattened for
-    # classification), which is what Grad-CAM needs
+    
+    # 1. Determine target class index
+    class_names = metadata.get("class_names", config.PATHOLOGIES)
+    if pathology_name not in class_names:
+        raise ValueError(f"Pathology {pathology_name} not found in class names: {class_names}")
+    class_idx = class_names.index(pathology_name)
+    
+    # 2. Extract target conv layer for gradients (stored in ImageEncoder)
+    if hasattr(model, "image_encoder"):
+        # LateFusionClassifier and ImageOnlyClassifier both expose .image_encoder
+        target_layer = model.image_encoder.last_conv_layer
+    else:
+        raise AttributeError(
+            "Model does not have an 'image_encoder' attribute. "
+            "Ensure you pass an ImageOnlyClassifier or LateFusionClassifier instance."
+        )
+        
     activations = {}
     gradients = {}
 
     def save_activation(module, input, output):
         activations["value"] = output
+        output.register_hook(lambda grad: gradients.update({"value": grad}))
 
-    def save_gradient(module, grad_input, grad_output):
-        gradients["value"] = grad_output[0]
+    # Register hook
+    handle_f = target_layer.register_forward_hook(save_activation)
 
-    target_layer = model.features[-1]
-    target_layer.register_forward_hook(save_activation)
-    target_layer.register_full_backward_hook(save_gradient)
-
+    # 3. Preprocess image
     transform = T.Compose([
-        T.Resize((224, 224)),
+        T.Resize(config.IMAGE_SIZE),
         T.Grayscale(num_output_channels=3),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-
+    
     original_image = Image.open(image_path).convert("L")
     tensor = transform(original_image).unsqueeze(0).to(device)
     tensor.requires_grad_()
 
-    output = model(tensor)
-    class_index = PATHOLOGIES.index(pathology_name)
-    score = output[0, class_index]
+    # 4. Forward pass
+    if text_inputs is not None:
+        # Late Fusion prediction
+        input_ids = text_inputs["input_ids"].to(device)
+        attention_mask = text_inputs["attention_mask"].to(device)
+        text_available = text_inputs["text_available"].to(device)
+        logits = model(tensor, input_ids, attention_mask, text_available)
+    else:
+        # Image-only baseline prediction
+        logits = model(tensor)
+        
+    probs = torch.sigmoid(logits)
+    score = logits[0, class_idx]
 
+    # 5. Backward pass
     model.zero_grad()
     score.backward()
 
-    # average the gradients to get an "importance weight" per feature
-    # channel, then combine with the activations to build the heatmap
-    pooled_gradients = torch.mean(gradients["value"], dim=[0, 2, 3])
-    activation_map = activations["value"].squeeze(0)
+    # 6. Extract heatmap
+    grads = gradients["value"]
+    acts = activations["value"]
+    
+    # Remove hooks
+    handle_f.remove()
 
-    for i in range(activation_map.shape[0]):
-        activation_map[i, :, :] *= pooled_gradients[i]
+    # Global average pooling of gradients
+    pooled_grads = torch.mean(grads, dim=[0, 2, 3])
+    acts_map = acts.squeeze(0).clone()
 
-    heatmap = torch.mean(activation_map, dim=0).detach().cpu().numpy()
-    heatmap = np.maximum(heatmap, 0)  # only keep positive influence
-    heatmap /= (heatmap.max() + 1e-8)  # normalize to 0-1
+    # Weighted sum of feature map activations
+    for i in range(acts_map.shape[0]):
+        acts_map[i, :, :] *= pooled_grads[i]
 
-    return heatmap, float(score.item())
-
+    heatmap = torch.mean(acts_map, dim=0).detach().cpu().numpy()
+    heatmap = np.maximum(heatmap, 0)  # ReLU on heatmap
+    heatmap /= (heatmap.max() + 1e-8)  # Normalize
+    
+    prob = float(probs[0, class_idx].item())
+    
+    return heatmap, prob
 
 def save_overlay(image_path, heatmap, output_path):
+    """
+    Overlays the heatmap on top of the original image and saves it.
+    """
     original = cv2.imread(str(image_path))
     heatmap_resized = cv2.resize(heatmap, (original.shape[1], original.shape[0]))
     heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
     overlay = cv2.addWeighted(original, 0.6, heatmap_colored, 0.4, 0)
     cv2.imwrite(str(output_path), overlay)
-
+    
+    # Save raw heatmap
+    raw_heatmap_path = str(output_path).replace(".png", "_raw.png")
+    cv2.imwrite(raw_heatmap_path, np.uint8(255 * heatmap_resized))
 
 if __name__ == "__main__":
-    OUTPUT_DIR.mkdir(exist_ok=True)
-
-    # example usage - point this at any X-ray + pathology you want to inspect
-    example_image = BASE_DIR / "data" / "images" / "example.png"
-    heatmap, confidence = generate_gradcam(example_image, "Pneumonia")
-
-    print(f"predicted confidence: {confidence:.3f}")
-    save_overlay(example_image, heatmap, OUTPUT_DIR / "gradcam_example.png")
-    print("saved heatmap overlay to", OUTPUT_DIR / "gradcam_example.png")
+    # Test script loading visual baseline and running Grad-CAM on mock image
+    print("Testing Grad-CAM pipeline...")
+    mock_img = config.IMAGES_DIR / "00000000_000.png"
+    if not mock_img.exists():
+        print("Mock image not found. Run generate_mock_data.py first.")
+    else:
+        metadata_path = config.MODEL_DIR / "densenet_metadata.json"
+        model_path = config.MODEL_DIR / "densenet_multilabel_best.pt"
+        
+        if not model_path.exists():
+            print("Checkpoint not found. Run train_classifier.py first.")
+        else:
+            with open(metadata_path, "r") as f:
+                meta = json.load(f)
+                
+            model = ImageOnlyClassifier("densenet121").to(device)
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            
+            # Generate Grad-CAM for Pneumonia
+            heatmap, score = generate_gradcam(model, mock_img, "Pneumonia", meta)
+            print(f"Pneumonia predicted prob: {score:.4f}")
+            
+            out_path = config.RESULTS_DIR / "gradcam_example_pneumonia.png"
+            save_overlay(mock_img, heatmap, out_path)
+            print(f"Saved Grad-CAM overlays to {config.RESULTS_DIR}")

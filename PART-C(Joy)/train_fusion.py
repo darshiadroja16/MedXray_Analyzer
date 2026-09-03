@@ -1,16 +1,14 @@
 """
-Step 2 of Part C.
+Step 2b of Part C.
 
-Trains a DenseNet-121 to predict, from a chest X-ray alone, the
-probability of each of the 14 NIH pathologies.
-Modified to:
-- Use config.py settings.
-- Implement patient-level splitting to prevent data leakage.
-- Output raw logits and use BCEWithLogitsLoss with pos_weight for class imbalance.
-- Implement validation-based threshold optimization.
-- Compute comprehensive metrics (AUROC, F1, Sensitivity, Specificity, etc.) on Test.
-- Track experiments using MLflow.
-- Save best/final checkpoints and metadata.
+Trains the LateFusionClassifier (DenseNet-121 + ClinicalBERT) to predict,
+from an X-ray and optional clinical notes, the 14 pathologies.
+- Leverages patient-level splitting to prevent leakage.
+- Handles missing notes with fallback zero representation (via dataset and projection).
+- Uses BCEWithLogitsLoss with pos_weight for class imbalance.
+- Performs validation-based threshold optimization.
+- Computes comprehensive test metrics.
+- Track runs under MLflow with clear synthetic/real text markers.
 """
 
 import json
@@ -18,21 +16,17 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 import mlflow
+from transformers import AutoTokenizer
 import config
 from dataset import get_datasets
-from models import ImageOnlyClassifier
+from models import LateFusionClassifier
 from eval_utils import calculate_metrics, optimize_thresholds
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def compute_pos_weights(dataset):
-    """
-    Computes positive weights to handle class imbalance in multilabel classification.
-    pos_weight = neg_samples / (pos_samples + epsilon)
-    """
     labels = []
     for i in range(len(dataset)):
         labels.append(dataset[i]["label"].numpy())
@@ -43,7 +37,6 @@ def compute_pos_weights(dataset):
     for c in range(config.NUM_CLASSES):
         pos = np.sum(labels[:, c])
         neg = num_samples - pos
-        # Prevent division by zero
         weight = neg / (pos + 1e-8)
         pos_weights.append(weight)
         
@@ -54,10 +47,13 @@ def train_epoch(model, dataloader, optimizer, loss_fn):
     total_loss = 0.0
     for batch in dataloader:
         images = batch["image"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        text_available = batch["text_available"].to(device)
         labels = batch["label"].to(device)
         
         optimizer.zero_grad()
-        logits = model(images)
+        logits = model(images, input_ids, attention_mask, text_available)
         loss = loss_fn(logits, labels)
         loss.backward()
         optimizer.step()
@@ -71,8 +67,12 @@ def evaluate_loss(model, dataloader, loss_fn):
     with torch.no_grad():
         for batch in dataloader:
             images = batch["image"].to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            text_available = batch["text_available"].to(device)
             labels = batch["label"].to(device)
-            logits = model(images)
+            
+            logits = model(images, input_ids, attention_mask, text_available)
             loss = loss_fn(logits, labels)
             total_loss += loss.item() * images.size(0)
     return total_loss / len(dataloader.dataset)
@@ -84,8 +84,12 @@ def predict_probabilities(model, dataloader):
     with torch.no_grad():
         for batch in dataloader:
             images = batch["image"].to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            text_available = batch["text_available"].to(device)
             labels = batch["label"].numpy()
-            logits = model(images)
+            
+            logits = model(images, input_ids, attention_mask, text_available)
             probs = torch.sigmoid(logits).cpu().numpy()
             
             all_probs.append(probs)
@@ -94,64 +98,57 @@ def predict_probabilities(model, dataloader):
     return np.vstack(all_targets), np.vstack(all_probs)
 
 def main():
-    # Set seed for reproducibility
     torch.manual_seed(config.SEED)
     np.random.seed(config.SEED)
     
     # 1. Setup MLflow
     mlflow.set_tracking_uri(config.MLFLOW_TRACKING_URI)
-    mlflow.set_experiment("MedXray_Module_C_Visual_Baseline")
+    mlflow.set_experiment("MedXray_Module_C_Multimodal_Fusion")
     
-    # Check if we need to generate mock data
-    if not config.LABELS_MULTILABEL_CSV.exists():
-        print("Dataset CSV not found. Running generate_mock_data.py first...")
-        import subprocess
-        subprocess.run(["python", "generate_mock_data.py"], check=True)
-        subprocess.run(["python", "prepare_labels.py"], check=True)
-
-    # 2. Get splits
-    train_set, val_set, test_set = get_datasets(config.LABELS_MULTILABEL_CSV, config.IMAGES_DIR)
+    # Initialize clinical text tokenizer
+    print(f"Loading tokenizer: {config.TEXT_MODEL_NAME}...")
+    tokenizer = AutoTokenizer.from_pretrained(config.TEXT_MODEL_NAME)
+    
+    # Get dataset splits
+    train_set, val_set, test_set = get_datasets(config.LABELS_MULTILABEL_CSV, config.IMAGES_DIR, tokenizer)
     
     is_synthetic = len(train_set) < 100
-    data_label = "SYNTHETIC VALIDATION DATA" if is_synthetic else "REAL NIH CLINICAL DATA"
+    data_label = "SYNTHETIC VALIDATION DATA" if is_synthetic else "REAL MIMIC/NIH CLINICAL DATA"
     print(f"\n==============================================================")
-    print(f" TRAINING VISUAL BASELINE ON: {data_label}")
+    print(f" TRAINING MULTIMODAL FUSION ON: {data_label}")
     print(f"==============================================================\n")
     
     train_loader = DataLoader(train_set, batch_size=config.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=config.BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_set, batch_size=config.BATCH_SIZE, shuffle=False)
     
-    # 3. Model setup
-    model = ImageOnlyClassifier(backbone_name="densenet121").to(device)
+    # 2. Model setup
+    model = LateFusionClassifier(image_backbone="densenet121").to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
     
-    # 4. Handle class imbalance
+    # Class imbalance weights
     pos_weight = compute_pos_weights(train_set)
-    print("Class Positive Weights:", pos_weight.cpu().numpy())
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     
-    # Best model path
-    best_model_path = config.MODEL_DIR / "densenet_multilabel_best.pt"
-    final_model_path = config.MODEL_DIR / "densenet_multilabel_final.pt"
-    metadata_path = config.MODEL_DIR / "densenet_metadata.json"
+    # Local paths
+    best_model_path = config.MODEL_DIR / "fusion_multilabel_best.pt"
+    final_model_path = config.MODEL_DIR / "fusion_multilabel_final.pt"
+    metadata_path = config.MODEL_DIR / "fusion_metadata.json"
     
-    # Start MLflow run
-    with mlflow.start_run(run_name="densenet121_baseline") as run:
-        # Log parameters
-        mlflow.log_param("backbone", "densenet121")
+    with mlflow.start_run(run_name="clinicalbert_densenet_late_fusion") as run:
+        # Log training info
+        mlflow.log_param("architecture", "LateFusionClassifier")
+        mlflow.log_param("image_backbone", "densenet121")
+        mlflow.log_param("text_model", config.TEXT_MODEL_NAME)
         mlflow.log_param("epochs", config.EPOCHS)
         mlflow.log_param("learning_rate", config.LEARNING_RATE)
         mlflow.log_param("batch_size", config.BATCH_SIZE)
         mlflow.log_param("seed", config.SEED)
-        mlflow.log_param("dataset_type", "synthetic" if is_synthetic else "real")
-        mlflow.log_param("train_samples", len(train_set))
-        mlflow.log_param("val_samples", len(val_set))
-        mlflow.log_param("test_samples", len(test_set))
+        # Clearly flag synthetic notes verification vs real clinical evaluations
+        mlflow.log_param("dataset_type", "synthetic_notes_validation" if is_synthetic else "real_paired_data")
         
         best_val_loss = float("inf")
         
-        # Training loop
         for epoch in range(config.EPOCHS):
             train_loss = train_epoch(model, train_loader, optimizer, loss_fn)
             val_loss = evaluate_loss(model, val_loader, loss_fn)
@@ -160,32 +157,28 @@ def main():
             mlflow.log_metric("train_loss", train_loss, step=epoch)
             mlflow.log_metric("val_loss", val_loss, step=epoch)
             
-            # Checkpoint best model
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save(model.state_dict(), best_model_path)
                 print(f"Saved new best model to {best_model_path}")
                 
-        # Save final model
+        # Save final model state
         torch.save(model.state_dict(), final_model_path)
         print(f"Saved final model to {final_model_path}")
         
-        # Load best model for evaluation
+        # Load best model for evaluations
         model.load_state_dict(torch.load(best_model_path, map_location=device))
         
-        # 5. Predict on Val to optimize thresholds
+        # 3. Optimize thresholds on Val
         print("Optimizing thresholds on validation set...")
         val_targets, val_probs = predict_probabilities(model, val_loader)
         optimal_thresholds = optimize_thresholds(val_targets, val_probs)
         print("Optimal Thresholds:", optimal_thresholds)
         
-        # 6. Evaluate on Test set
+        # 4. Evaluate on Test set
         print("Evaluating on test set...")
         test_targets, test_probs = predict_probabilities(model, test_loader)
         
-        # Standard threshold metrics
-        macro_std, per_class_std = calculate_metrics(test_targets, test_probs)
-        # Optimized threshold metrics
         macro_opt, per_class_opt = calculate_metrics(test_targets, test_probs, thresholds=optimal_thresholds)
         
         print("\n--- TEST METRICS (Optimized Thresholds) ---")
@@ -201,13 +194,14 @@ def main():
                 if metric_name != "Threshold":
                     mlflow.log_metric(f"test_{c_name.lower()}_{metric_name.lower()}", val)
                     
-        # Log final artifacts
+        # Log final model file
         mlflow.log_artifact(str(best_model_path))
         
         # Save metadata config locally
         metadata = {
-            "model_name": "ImageOnlyClassifier",
-            "backbone": "densenet121",
+            "model_name": "LateFusionClassifier",
+            "image_backbone": "densenet121",
+            "text_model": config.TEXT_MODEL_NAME,
             "is_synthetic": is_synthetic,
             "seed": config.SEED,
             "class_names": config.PATHOLOGIES,
@@ -222,7 +216,7 @@ def main():
             
         mlflow.log_artifact(str(metadata_path))
         print("Metadata saved to", metadata_path)
-        print("MLflow Run completed successfully!")
+        print("MLflow Multimodal run completed successfully!")
 
 if __name__ == "__main__":
     main()

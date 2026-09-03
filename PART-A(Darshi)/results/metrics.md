@@ -15,6 +15,3 @@ Val set: 300 images (unseen during training)
 - This is a baseline run on a small subset - not the final model.
 - mAP50 is calculated on the validation set (images the model never saw during training).
 - Next: train on the full ~25,000 image dataset with more epochs (50-100).
-
-
-

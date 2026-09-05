@@ -1,4 +1,6 @@
 [core]
-    remote = myremote
+    remote = mylocal
 ['remote "myremote"']
     url = gdrive://1tUcfU_LEfC5qqDXfdyDLrU7XGA3ABOrj
+['remote "mylocal"']
+    url = D:\DVC_Storage\Multi-Modal_Medical_Image_Analysis

@@ -1,74 +1,222 @@
-# Part A - Pneumonia Bounding Box Detection
+# Task A — Pneumonia Detection with YOLOv8
 
-**Owner:** Darshi
-**Model:** YOLOv8n (Ultralytics)
-**Dataset:** RSNA Pneumonia Detection Challenge (Kaggle)
+Part of the **Multi-Modal Medical Image Analysis Platform** final year project.
+This module trains a **YOLOv8** object detector on the **RSNA Pneumonia Detection
+Challenge** dataset to localize lung-opacity (pneumonia) regions on frontal chest
+X-rays.
 
-## What this does
-Takes a chest X-ray and draws a bounding box around any region that looks
-like pneumonia, with a confidence score.
+---
 
-- Input: chest X-ray image (converted from DICOM to PNG)
-- Output: bounding box coordinates + confidence score
+## Repository Structure
 
-## Why YOLOv8
-Compared against Faster R-CNN and SSD. Faster R-CNN is generally more
-accurate but much slower and heavier to train. YOLO trades
-a small amount of accuracy for a big speed/resource win, and modern
-versions like YOLOv8 have closed most of that accuracy gap. Prior work
-training YOLOv3 on this exact RSNA dataset beat the official competition's
-top leaderboard score, which was a strong signal that the YOLO family
-works well on this specific problem. YOLOv8 specifically because it's the
-current stable, actively maintained version, with an anchor-free detection
-head (less manual tuning needed) and an easier training pipeline via the
-`ultralytics` package.
+```
+Multi-Modal_Medical_Image_Analysis_Platform/
+├── .dvc/                     # DVC internal config (remote, cache pointers)
+├── .venv/                    # local virtual environment (not tracked)
+└── PART-A(...)/
+    ├── weights/
+    │   ├── .gitignore        # keeps best.pt out of git
+    │   ├── best.pt           # trained weights (pulled via DVC, not stored in git)
+    │   └── best.pt.dvc       # DVC pointer file (tracked in git)
+    ├── dataset.yaml           # YOLO dataset config (paths + class names)
+    ├── metrics.md              # baseline training metrics
+    ├── notebook.ipynb          # full training notebook (run on Kaggle)
+    └── README.md                # this file
+```
 
-## How to get the data
-Uses the RSNA Pneumonia Detection Challenge dataset. It is NOT included in
-this repo (too large for git, ~4GB).
+> **Why DVC?** `best.pt` is a binary model file — too large/inefficient to store
+> directly in git. Git tracks the small `best.pt.dvc` pointer file, while the
+> actual weight file lives in DVC remote storage and is pulled on demand.
 
-To reproduce:
-1. Join the competition on Kaggle: kaggle.com/c/rsna-pneumonia-detection-challenge
-   (free, just accept the rules once)
-2. Open/copy this repo's code into a new Kaggle Notebook created directly
-   from the competition page - the dataset auto-attaches at
-   `/kaggle/input/competitions/rsna-pneumonia-detection-challenge/`
-3. Or, to get it on a local machine instead:
+---
+
+## Requirements
+
+- Python 3.9+
+- Git
+- [DVC](https://dvc.org/) (`pip install dvc`) — plus the DVC plugin for whichever
+  remote is configured for this repo (e.g. `dvc[gdrive]`, `dvc[s3]`)
+- A Kaggle account (only needed if training from scratch)
+
+Core Python packages used across the notebook and inference:
+   ultralytics pydicom opencv-python pandas numpy scikit-learn tqdm dvc
+
+---
+
+## 1. Clone the Repo
+
+```bash
+git clone <your-repo-url>
+cd Multi-Modal_Medical_Image_Analysis_Platform
+```
+
+Set up a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install ultralytics pydicom opencv-python pandas numpy scikit-learn tqdm dvc
+```
+
+---
+
+## Option 1 — Just Run Inference with the Pretrained Weights
+
+Use this path if you don't want to retrain anything and just want predictions
+from the already-trained model.
+
+**Step 1 — Pull the weights via DVC**
+
+```bash
+cd "PART-A(...)"
+dvc pull weights/best.pt.dvc
+```
+
+This downloads the actual `best.pt` file from the configured DVC remote into
+`weights/best.pt`. (If `dvc pull` fails with a remote/auth error, make sure
+you have access to the DVC remote this repo points to — check `.dvc/config`.)
+
+**Step 2 — Run detection on an X-ray**
+
+```python
+from ultralytics import YOLO
+
+model = YOLO("weights/best.pt")
+
+results = model.predict(
+    source="path/to/your_xray.png",   # or a folder of images
+    conf=0.086,                        # best-F1 confidence from metrics.md
+    save=True                          # saves annotated output image
+)
+
+results[0].show()   # display prediction with bounding boxes
+```
+
+Annotated outputs are saved under `runs/detect/predict/`.
+
+---
+
+## Option 2 — Train the Model from Scratch
+
+Use this path if you want to reproduce or improve on the baseline.
+
+### Step 1 — Get the RSNA dataset from Kaggle
+
+1. Create a free account at [kaggle.com](https://www.kaggle.com) and join the
+   competition: [RSNA Pneumonia Detection Challenge](https://www.kaggle.com/c/rsna-pneumonia-detection-challenge)
+   (you must click **"Join Competition"** and accept the rules before you can
+   download anything).
+2. Get an API token: **Kaggle profile → Settings → API → Create New Token**.
+   This downloads `kaggle.json`.
+3. **Recommended:** skip local downloading entirely — open a new
+   [Kaggle Notebook](https://www.kaggle.com/code), click **Add Input →
+   Competitions**, search "RSNA Pneumonia Detection Challenge", and attach it.
+   The data will be available at `/kaggle/input/rsna-pneumonia-detection-challenge/`
+   with no download step needed. This is exactly how `notebook.ipynb` in this
+   repo was run.
+4. **If you want it locally instead:**
    ```bash
    pip install kaggle
+   mkdir -p ~/.kaggle && mv kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
    kaggle competitions download -c rsna-pneumonia-detection-challenge
+   unzip rsna-pneumonia-detection-challenge.zip -d rsna_data
+   unzip rsna_data/stage_2_train_images.zip -d rsna_data/stage_2_train_images
    ```
 
-## How to run (in a Kaggle notebook, GPU on)
+### Step 2 — Convert DICOM + CSV labels into YOLO format
 
-Run in this exact order, every session (Kaggle wipes `/kaggle/working/`
-each time the session restarts, so all 4 steps need a fresh run - just
-re-running `train.py` alone after a restart will fail with a
-FileNotFoundError):
+Open and run `notebook.ipynb` (in Kaggle, or locally after adjusting paths).
+It performs the full pipeline:
 
-1. `data_prep/dicom_to_yolo.py` - converts raw DICOM + CSV labels into
-   YOLO's image + label format
-2. `data_prep/train_val_split.py` - splits data into train/val so we can
-   test on images the model hasn't seen
-3. `data_prep/make_dataset_yaml.py` - (re)creates `dataset.yaml` at
-   `/kaggle/working/dataset.yaml`, which `train.py` needs to find the data
-4. `train.py` - trains the YOLOv8 model
-5. `evaluate.py` - checks mAP/precision/recall on the validation set
+1. Loads `stage_2_train_labels.csv` (`patientId, x, y, width, height, Target`).
+2. Selects the first `NUM_IMAGES = 2000` unique patients and splits them
+   **by `patientId`** into train/val (80/20, `random_state=42`) — this avoids
+   the same patient's images leaking across the split.
+3. For every patient: reads the `.dcm` file, normalizes pixel values to
+   0–255, converts grayscale → 3-channel, resizes to `1024×1024`, and saves
+   as PNG under `images/train/` or `images/val/`.
+4. Converts each pneumonia box from pixel coordinates `(x, y, width, height)`
+   into YOLO's normalized `(x_center, y_center, w, h)` format, one `.txt`
+   label file per image (single class, id `0 = pneumonia`; empty file = no
+   pneumonia present).
+5. Writes `dataset.yaml` describing the resulting folder layout.
 
-Each script has its paths set for Kaggle's `/kaggle/input` and
-`/kaggle/working` folders - copy the code into notebook cells (or `!python
-script.py` if uploaded as files) and run in order. Easiest: use Kaggle's
-"Run All" so you never accidentally skip a step.
+Resulting structure (matches what `dataset.yaml` expects):
 
+```
+rsna_yolo/
+├── images/
+│   ├── train/   (1600 PNGs)
+│   └── val/     (400 PNGs)
+└── labels/
+    ├── train/   (1600 .txt files, one per image)
+    └── val/     (400 .txt files)
+```
 
-## Status (Day 1 baseline)
-See `results/metrics.md` for numbers and `results/sample_predictions/` for
-example detections. This is a small-subset baseline (2000 images, 15
-epochs) to prove the pipeline works end to end, not the final model.
+> If you run this outside Kaggle, update the `path:` field in
+> `dataset.yaml` to point at your local `rsna_yolo/` folder — the checked-in
+> version points at the Kaggle working directory.
 
-## Next steps
-- Train on the full dataset, more epochs
-- Try YOLOv8s/m and compare
-- Implement the RSNA-specific mAP metric (IoU averaged 0.4-0.75) for a
-  fair leaderboard comparison
-- Set up DVC remote storage for the dataset and model weights
+### Step 3 — Train YOLOv8
+
+```bash
+pip install ultralytics
+
+yolo detect train \
+  data=dataset.yaml \
+  model=yolov8n.pt \
+  epochs=15 \
+  imgsz=1024 \
+  patience=10
+```
+
+Trained weights will appear at `runs/detect/train/weights/best.pt`. Copy that
+into `weights/best.pt` and re-run `dvc add weights/best.pt` + `dvc push` to
+version the new weights (see below).
+
+### Step 4 — Evaluate
+
+```bash
+yolo detect val model=runs/detect/train/weights/best.pt data=dataset.yaml
+```
+
+Compare the output metrics against the current baseline in `metrics.md`.
+
+---
+
+## Current Baseline (see `metrics.md`)
+
+**Model:** YOLOv8n · **Train:** 1600 images · **Val:** 400 images · **Epochs:** 15
+
+| Metric | Value |
+|---|---:|
+| Precision | 0.233 |
+| Recall | 0.516 |
+| mAP@0.5 | 0.267 |
+| mAP@0.5:0.95 | 0.100 |
+| Best F1 | 0.29 |
+| Best F1 Confidence | 0.086 |
+
+**Confusion Matrix:** TP: 0 · FP: 0 · FN: 198 · Background: 198
+
+This is an early baseline (small subset of data, only 15 epochs, nano model
+size) — it's meant as a reference point for future experiments (more images,
+more epochs, larger YOLOv8 variant, class-imbalance handling), not a final
+result.
+
+---
+
+## Updating the Tracked Weights (DVC)
+
+If you retrain and get a new `best.pt`:
+
+```bash
+dvc add weights/best.pt
+git add weights/best.pt.dvc weights/.gitignore
+git commit -m "Update baseline weights"
+dvc push
+git push
+```
+
+This keeps the large binary out of git history while still versioning it
+alongside the code.

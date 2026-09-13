@@ -1,8 +1,10 @@
 
-path: /kaggle/working/rsna_yolo
+path: /kaggle/working/rsna_yolo_round1
 
 train: images/train
 val: images/val
+
+nc: 1
 
 names:
   0: pneumonia
